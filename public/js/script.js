@@ -6,9 +6,79 @@ let isTyping = false;
 let typingTimeout;
 let unreadMessages = new Set();
 let lastNotificationTime = 0;
+let windowHasFocus = true;
+let soundEnabled = false;
+
+// Audio notification
+const notificationSound = document.getElementById('notificationSound');
+const MIN_NOTIFICATION_INTERVAL = 3000; // Minimum time between notification sounds (3 seconds)
+
+// Ensure audio is loaded and ready
+notificationSound.load();
+
+// Enable sound on first interaction
+function enableSound() {
+    if (!soundEnabled) {
+        console.log('Enabling sound...');
+        notificationSound.volume = 0;
+        notificationSound.play()
+            .then(() => {
+                soundEnabled = true;
+                notificationSound.volume = 1;
+                notificationSound.pause();
+                notificationSound.currentTime = 0;
+                console.log('Sound enabled successfully');
+            })
+            .catch(err => console.error('Could not enable sound:', err));
+    }
+}
+
+// Add sound enabler to user interactions
+['click', 'touchstart', 'keydown'].forEach(event => {
+    document.addEventListener(event, enableSound, { once: true });
+});
+
+// Window focus handling
+window.addEventListener('focus', () => {
+    console.log('Window focused');
+    windowHasFocus = true;
+    unreadMessages.clear();
+});
+
+window.addEventListener('blur', () => {
+    console.log('Window blurred');
+    windowHasFocus = false;
+});
+
+// Function to play notification sound
+function playNotificationSound() {
+    if (!soundEnabled) {
+        console.log('Sound not enabled yet, waiting for user interaction');
+        return;
+    }
+
+    const now = Date.now();
+    if (now - lastNotificationTime >= MIN_NOTIFICATION_INTERVAL) {
+        console.log('Attempting to play sound...');
+        notificationSound.currentTime = 0;
+        notificationSound.volume = 1;
+        notificationSound.play()
+            .then(() => {
+                console.log('Sound played successfully');
+                lastNotificationTime = now;
+            })
+            .catch(err => {
+                console.error('Error playing sound:', err);
+                soundEnabled = false; // Reset if we lost permission
+                enableSound(); // Try to re-enable
+            });
+    } else {
+        console.log('Skipping sound, too soon since last play');
+    }
+}
 
 // Auto-logout configuration
-const INACTIVE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+const INACTIVE_TIMEOUT = 5 * 60 * 1000; 
 let inactivityTimer;
 
 function resetInactivityTimer() {
@@ -125,7 +195,8 @@ function initializeChat() {
     
     initializeSocket();
     setupTypingHandler();
-    loadMessageHistory();
+    loadMessageHistory(0, true); // Start with page 0 and scroll to bottom
+    setupScrollPagination(); // Setup scroll event for pagination
 }
 
 // Show login form
@@ -190,8 +261,10 @@ function initializeSocket() {
             // Add message to UI
             addMessageToUI(message);
             
-            // Play notification sound for received messages
-            playNotificationSound();
+            // Play notification sound only when window is not focused
+            if (!windowHasFocus) {
+                playNotificationSound();
+            }
         }
         
         // Scroll to bottom
@@ -298,9 +371,45 @@ function getTimeAgo(date) {
     });
 }
 
-async function loadMessageHistory() {
+// Add message pagination state
+let messageState = {
+    currentPage: 0,
+    hasMore: true,
+    isLoading: false,
+    initialLoad: true,
+    lastScrollPosition: 0
+};
+
+// Updated function to load messages with pagination
+async function loadMessageHistory(page = 0, scrollToBottom = true) {
     try {
-        const response = await fetch('/messages', {
+        if (messageState.isLoading) return;
+        
+        messageState.isLoading = true;
+        const limit = 50; // Messages per page
+        
+        // Show loading indicator for initial load
+        if (messageState.initialLoad) {
+            showLoading('Loading messages...');
+        } else if (page === 0) {
+            // For refresh, show loading
+            showLoading('Refreshing messages...');
+        } else {
+            // Add loading indicator at the top for older messages
+            const loadingIndicator = document.createElement('div');
+            loadingIndicator.id = 'messageLoadingIndicator';
+            loadingIndicator.className = 'message-loading';
+            loadingIndicator.textContent = 'Loading older messages...';
+            
+            const messagesDiv = document.getElementById('messages');
+            if (messagesDiv.firstChild) {
+                messagesDiv.insertBefore(loadingIndicator, messagesDiv.firstChild);
+            } else {
+                messagesDiv.appendChild(loadingIndicator);
+            }
+        }
+        
+        const response = await fetch(`/messages?page=${page}&limit=${limit}`, {
             headers: {
                 'Authorization': `Bearer ${authToken}`,
                 'Content-Type': 'application/json'
@@ -311,27 +420,90 @@ async function loadMessageHistory() {
             throw new Error(`Failed to load messages: ${response.status}`);
         }
 
-        const messages = await response.json();
-        const messagesDiv = document.getElementById('messages');
-        messagesDiv.innerHTML = ''; // Clear existing messages
+        const data = await response.json();
+        console.log(data);
         
-        if (messages && messages.length > 0) {
-            messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-            messages.forEach(message => addMessageToUI(message));
+        const { messages, pagination } = data;
+        
+        // Remove loading indicator if it exists
+        const loadingIndicator = document.getElementById('messageLoadingIndicator');
+        if (loadingIndicator) {
+            loadingIndicator.remove();
         }
-
-        // Scroll to bottom after loading messages
-        setTimeout(() => {
-            const container = document.getElementById('messagesContainer');
-            container.scrollTop = container.scrollHeight;
-        }, 100);
-
+        
+        // Update pagination state
+        messageState.currentPage = pagination.page;
+        messageState.hasMore = pagination.hasMore;
+        
+        const messagesDiv = document.getElementById('messages');
+        const messagesContainer = document.getElementById('messagesContainer');
+        
+        // Save scroll position and height before adding new messages
+        const prevScrollHeight = messagesContainer.scrollHeight;
+        
+        // For first page or refresh, clear existing messages
+        if (page === 0) {
+            messagesDiv.innerHTML = '';
+        }
+        
+        // For initial load or refresh, process all messages
+        if (messages && messages.length > 0) {
+            // Remember the first message's ID for scroll position restoration
+            const firstMessageId = messages[0].id;
+            
+            // Add messages in order
+            messages.forEach(message => addMessageToUI(message, page !== 0));
+            
+            // Handle scrolling based on context
+            if (scrollToBottom || messageState.initialLoad) {
+                // Scroll to bottom for new messages or initial load
+                setTimeout(() => {
+                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                    messageState.initialLoad = false;
+                }, 100);
+            } else if (page > 0) {
+                // Maintain scroll position when loading older messages
+                setTimeout(() => {
+                    // Find the element that was previously at the top
+                    const firstMessage = document.getElementById(`message-${firstMessageId}`);
+                    if (firstMessage) {
+                        // Calculate new position
+                        const newScrollHeight = messagesContainer.scrollHeight;
+                        const heightDiff = newScrollHeight - prevScrollHeight;
+                        messagesContainer.scrollTop = heightDiff;
+                    }
+                }, 100);
+            }
+        }
+        
+        // Hide loading indicator
+        hideLoading();
+        
     } catch (error) {
         console.error('Failed to load messages:', error);
+        hideLoading();
         if (error.message.includes('token')) {
             handleAuthError();
         }
+    } finally {
+        messageState.isLoading = false;
     }
+}
+
+// Function to load older messages when scrolling up
+function setupScrollPagination() {
+    const messagesContainer = document.getElementById('messagesContainer');
+    
+    messagesContainer.addEventListener('scroll', function() {
+        // If we're near the top of the container and there are more messages
+        if (messagesContainer.scrollTop < 200 && messageState.hasMore && !messageState.isLoading) {
+            // Load the next page
+            loadMessageHistory(messageState.currentPage + 1, false);
+        }
+        
+        // Store last scroll position
+        messageState.lastScrollPosition = messagesContainer.scrollTop;
+    });
 }
 
 // Handle authentication errors
@@ -344,251 +516,452 @@ function handleAuthError() {
 }
 
 // Add message to UI
-function addMessageToUI(message) {
+function addMessageToUI(message, prepend = false) {
     const messagesDiv = document.getElementById('messages');
-    const isSent = message.sender.toLowerCase() === currentUser.toLowerCase();
+    
+    // Create message container
+    const messageContainer = document.createElement('div');
+    messageContainer.className = `message-container ${message.sender === currentUser ? 'sent' : 'received'}`;
+    messageContainer.id = `message-${message.id}`; // Add ID for scroll position reference
+    
+    // Message content div
     const messageDiv = document.createElement('div');
-    messageDiv.className = `message ${isSent ? 'sent' : 'received'}`;
-
-    const timestamp = new Date(message.timestamp).toLocaleString();
-    messageDiv.innerHTML = `
-        <div class="message-content">
-            <p>${message.content || ''}</p>
-            <div class="message-footer">
-                <span class="timestamp">${timestamp}</span>
-                ${isSent ? `<span class="message-status">${message.status === 'read' ? '✓✓' : '✓'}</span>` : ''}
-            </div>
-        </div>
-    `;
-
-    // Handle media attachments
-    const mediaUrls = Array.isArray(message.media_urls) ? message.media_urls : 
-                     (message.media_urls ? JSON.parse(message.media_urls) : null);
-    const mediaTypes = Array.isArray(message.media_types) ? message.media_types :
-                      (message.media_types ? JSON.parse(message.media_types) : null);
-
-    if (mediaUrls && mediaUrls.length > 0) {
-        const mediaContainer = document.createElement('div');
-        mediaContainer.className = 'media-container';
+    messageDiv.className = 'message';
+    
+    // Text content
+    if (message.content) {
+        const textDiv = document.createElement('div');
+        textDiv.className = 'message-text';
+        textDiv.innerHTML = message.content.replace(/\n/g, '<br>');
+        messageDiv.appendChild(textDiv);
+    }
+    
+    // Media content if any
+    if (message.media_urls && Array.isArray(message.media_urls) && message.media_urls.length > 0) {
+        const mediaTypes = Array.isArray(message.media_types) ? message.media_types : [];
         
-        mediaUrls.forEach((url, index) => {
-            const mediaType = mediaTypes?.[index] || 'document';
-            const mediaElement = createMediaElement(url, mediaType);
-            if (mediaElement) {
-                mediaContainer.appendChild(mediaElement);
-            }
+        message.media_urls.forEach((url, index) => {
+            const type = mediaTypes[index] || 'image';
+            const mediaElement = createMediaElement(url, type);
+            messageDiv.appendChild(mediaElement);
         });
-        
-        messageDiv.appendChild(mediaContainer);
     }
-
-    messagesDiv.appendChild(messageDiv);
-    const container = document.getElementById('messagesContainer');
-    container.scrollTop = container.scrollHeight;
-}
-
-// Create media element based on type
-function createMediaElement(url, type) {
-    if (type === 'image') {
-        const img = document.createElement('img');
-        img.src = url;
-        img.alt = 'Shared Image';
-        img.classList.add('message-media');
-        // Add click handler for fullscreen
-        img.addEventListener('click', () => showImageFullscreen(url));
-        return img;
-    } else if (type === 'video') {
-        const video = document.createElement('video');
-        video.src = url;
-        video.controls = true;
-        video.classList.add('message-media');
-        return video;
-    }
-    return null;
-}
-
-// Fullscreen image handling
-function showImageFullscreen(imageUrl) {
-    const modal = document.getElementById('imageModal');
-    const modalImg = document.getElementById('modalImage');
-    const closeBtn = document.querySelector('.close-modal');
     
-    modalImg.src = imageUrl;
-    modal.style.display = 'block';
+    // Timestamp
+    const timeDiv = document.createElement('div');
+    timeDiv.className = 'message-time';
+    const messageDate = new Date(message.timestamp);
     
-    // Close on clicking X button
-    closeBtn.onclick = () => {
-        modal.style.display = 'none';
+    // Format message timestamp to local time
+    const timeOptions = {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
     };
     
-    // Close on clicking outside the image
-    modal.onclick = (e) => {
-        if (e.target === modal) {
-            modal.style.display = 'none';
-        }
-    };
+    // Add date only for messages from a different day
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
     
-    // Close on escape key
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape' && modal.style.display === 'block') {
-            modal.style.display = 'none';
+    if (messageDate.toDateString() === today.toDateString()) {
+        timeDiv.textContent = `Today, ${messageDate.toLocaleTimeString([], timeOptions)}`;
+    } else if (messageDate.toDateString() === yesterday.toDateString()) {
+        timeDiv.textContent = `Yesterday, ${messageDate.toLocaleTimeString([], timeOptions)}`;
+    } else {
+        timeDiv.textContent = `${messageDate.toLocaleDateString([], { 
+            month: 'short', 
+            day: 'numeric' 
+        })}, ${messageDate.toLocaleTimeString([], timeOptions)}`;
+    }
+    
+    messageDiv.appendChild(timeDiv);
+    messageContainer.appendChild(messageDiv);
+    
+    // Add to DOM based on whether to prepend or append
+    if (prepend && messagesDiv.firstChild) {
+        messagesDiv.insertBefore(messageContainer, messagesDiv.firstChild);
+    } else {
+        messagesDiv.appendChild(messageContainer);
+    }
+    
+    // Handle lazy loading of media
+    lazyLoadMessageMedia(messageContainer);
+}
+
+// Function to lazy load media in messages
+function lazyLoadMessageMedia(messageContainer) {
+    const mediaElements = messageContainer.querySelectorAll('img, video');
+    
+    mediaElements.forEach(media => {
+        // Use IntersectionObserver for lazy loading
+        if ('IntersectionObserver' in window) {
+            const lazyMediaObserver = new IntersectionObserver((entries, observer) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        const mediaElement = entry.target;
+                        
+                        // If data-src is defined, use it to set the src
+                        if (mediaElement.dataset.src) {
+                            mediaElement.src = mediaElement.dataset.src;
+                            mediaElement.removeAttribute('data-src');
+                        }
+                        
+                        observer.unobserve(mediaElement);
+                    }
+                });
+            });
+            
+            lazyMediaObserver.observe(media);
+        } else {
+            // Fallback for browsers without IntersectionObserver
+            media.src = media.dataset.src;
+            media.removeAttribute('data-src');
         }
     });
 }
 
+// Import the necessary compression libraries
+async function loadCompressionLibraries() {
+    try {
+        // Load image compression library
+        await loadScript('https://cdn.jsdelivr.net/npm/browser-image-compression@2.0.2/dist/browser-image-compression.min.js');
+        
+        // Load FFmpeg
+        const { createFFmpeg, fetchFile } = FFmpeg;
+        window.FFmpeg = { createFFmpeg, fetchFile };
+        
+        console.log('Compression libraries loaded successfully');
+        window.compressionLibrariesLoaded = true;
+    } catch (error) {
+        console.error('Error loading compression libraries:', error);
+        window.compressionLibrariesLoaded = false;
+        alert('Media compression libraries failed to load. Files will be uploaded without compression.');
+    }
+}
+
+// Helper function to load scripts
+function loadScript(src) {
+    return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = src;
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+    });
+}
+
+// Compress image with better handling
+async function compressImage(file) {
+    try {
+        if (!window.compressionLibrariesLoaded || typeof imageCompression !== 'function') {
+            console.warn('Image compression library not loaded');
+            return file;
+        }
+        
+        console.log('Starting image compression:', file.name);
+        showLoading('Compressing image...');
+        
+        const options = {
+            maxSizeMB: 1,
+            maxWidthOrHeight: 1920,
+            useWebWorker: true,
+            initialQuality: 0.7,
+            onProgress: (percent) => {
+                console.log(`Compression progress: ${percent}%`);
+                showLoading(`Compressing... ${Math.round(percent)}%`);
+            }
+        };
+        
+        const compressedFile = await imageCompression(file, options);
+        console.log(`Original size: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
+        console.log(`Compressed size: ${(compressedFile.size / 1024 / 1024).toFixed(2)} MB`);
+        
+        return compressedFile;
+    } catch (error) {
+        console.error('Image compression error:', error);
+        return file;
+    }
+}
+
+function createMediaElement(url, type) {
+    const container = document.createElement('div');
+    container.className = 'media-container';
+
+    // Add loading state
+    const loader = document.createElement('div');
+    loader.className = 'media-loader';
+    loader.innerHTML = `
+        <div class="spinner"></div>
+        <span>Loading media...</span>
+    `;
+    container.appendChild(loader);
+
+    // Create media element
+    const media = type.startsWith('video/') 
+        ? document.createElement('video')
+        : document.createElement('image');
+
+    media.className = 'media-content';
+    media.setAttribute('loading', 'lazy');
+    
+    if (media.tagName === 'VIDEO') {
+        media.controls = true;
+        media.playsInline = true;
+    }
+
+    // Handle successful load
+    media.onload = media.onloadeddata = () => {
+        container.removeChild(loader);
+        container.appendChild(media);
+    };
+
+    // Handle errors
+    media.onerror = () => {
+        loader.innerHTML = 'Failed to load media';
+        loader.className = 'media-error';
+    };
+
+    media.src = url;
+    return container;
+}
+
+// Update video preview handling
+function createMediaPreview(file) {
+    return new Promise((resolve) => {
+        const reader = new FileReader();
+        const preview = document.createElement('div');
+        preview.className = 'media-preview';
+        
+        reader.onload = (e) => {
+            if (file.type.startsWith('video/')) {
+                const video = document.createElement('video');
+                video.className = 'preview-content';
+                video.controls = true;
+                video.preload = 'metadata';
+                video.playsInline = true;
+                
+                // Handle video preview errors
+                video.onerror = function() {
+                    console.error('Video preview error:', video.error);
+                    const errorMsg = document.createElement('div');
+                    errorMsg.className = 'preview-error';
+                    errorMsg.textContent = 'Video preview failed';
+                    preview.appendChild(errorMsg);
+                };
+                
+                preview.appendChild(video);
+            } else if (file.type.startsWith('image/')) {
+                const img = document.createElement('img');
+                img.className = 'preview-content';
+                img.src = e.target.result;
+                preview.appendChild(img);
+            }
+            resolve(preview);
+        };
+        
+        reader.onerror = () => {
+            console.error('File preview error:', reader.error);
+            const errorMsg = document.createElement('div');
+            errorMsg.className = 'preview-error';
+            errorMsg.textContent = 'Preview failed';
+            preview.appendChild(errorMsg);
+            resolve(preview);
+        };
+        
+        reader.readAsDataURL(file);
+    });
+}
+function isFileTypeAllowed(file) {
+    const allowedTypes = [
+        'image/jpeg', 'image/png', 'image/gif',
+        'video/mp4', 'video/webm', 'video/ogg'
+    ];
+    return allowedTypes.includes(file.type);
+}
+
 // File input handler with preview
+let isUploading = false;
+
 document.getElementById('fileInput').addEventListener('change', function(e) {
     const files = Array.from(e.target.files);
     const previewContainer = document.getElementById('mediaPreview');
     
     // Clear previous previews
     previewContainer.innerHTML = '';
-    
+
     files.forEach(file => {
         if (!isFileTypeAllowed(file)) {
             alert(`File type not allowed: ${file.type}`);
             return;
         }
-        
+
         const previewWrapper = document.createElement('div');
         previewWrapper.className = 'media-preview-item';
-        
-        // Create preview based on file type
+
+        // Create preview for images or videos
         if (file.type.startsWith('image/')) {
             const img = document.createElement('img');
             img.src = URL.createObjectURL(file);
+            img.className = 'preview-image';
             previewWrapper.appendChild(img);
         } else if (file.type.startsWith('video/')) {
             const video = document.createElement('video');
             video.src = URL.createObjectURL(file);
             video.controls = true;
+            video.className = 'preview-video';
             previewWrapper.appendChild(video);
         }
-        
-        // Add remove button
+
+        // Add progress bar
+        const progressBarContainer = document.createElement('div');
+        progressBarContainer.className = 'upload-progress';
+        progressBarContainer.innerHTML = `
+            <div class="progress-bar"></div>
+            <span class="progress-text">Preparing...</span>
+        `;
+        previewWrapper.appendChild(progressBarContainer);
+
+        // Remove button
         const removeBtn = document.createElement('button');
-        removeBtn.className = 'media-preview-remove';
+        removeBtn.className = 'remove-preview';
         removeBtn.innerHTML = '×';
-        removeBtn.onclick = function(e) {
-            e.preventDefault();
+        removeBtn.onclick = function () {
             previewWrapper.remove();
-            
-            // If no previews left, clear the file input
-            if (previewContainer.children.length === 0) {
-                document.getElementById('fileInput').value = '';
-            }
+            document.getElementById('fileInput').value = ''; // Clear input if no files remain
         };
-        
         previewWrapper.appendChild(removeBtn);
+
         previewContainer.appendChild(previewWrapper);
     });
 });
 
-// Update message form submit to handle media
 document.getElementById('messageForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    
+
     const messageInput = document.getElementById('messageInput');
     const fileInput = document.getElementById('fileInput');
+    const sendButton = document.querySelector('#messageForm button[type="submit"]');
     const content = messageInput.value.trim();
-    
-    // Check if there's either text content or files
+
     if (!content && fileInput.files.length === 0) {
         return;
     }
-    
+
     try {
         let mediaUrls = [];
         let mediaTypes = [];
-        
-        // Handle file uploads first if any
+
         if (fileInput.files.length > 0) {
             try {
-                // Check if we have an auth token
-                if (!authToken) {
-                    throw new Error('Not authenticated. Please log in again.');
-                }
+                sendButton.disabled = true;
+
+                // Show progress bars
+                document.querySelectorAll('.upload-progress').forEach(p => p.style.display = 'block');
 
                 const formData = new FormData();
-                Array.from(fileInput.files).forEach(file => {
-                    formData.append('media', file);  
-                });
-                
-                const uploadResponse = await fetch('/upload', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${authToken}`
-                    },
-                    body: formData
-                });
-                
-                let errorMessage;
-                if (!uploadResponse.ok) {
-                    const responseText = await uploadResponse.text();
-                    try {
-                        const errorData = JSON.parse(responseText);
-                        errorMessage = errorData.error;
-                    } catch (e) {
-                        errorMessage = responseText;
-                    }
-                    throw new Error(errorMessage || 'Failed to upload files');
-                }
-                
-                const uploadResult = await uploadResponse.json();
-                if (!uploadResult.urls || !Array.isArray(uploadResult.urls)) {
-                    throw new Error('Invalid response from server');
-                }
-                
-                mediaUrls = uploadResult.urls;
-                mediaTypes = uploadResult.types || Array.from(fileInput.files).map(file => 
-                    file.type.startsWith('image/') ? 'image' :
-                    file.type.startsWith('video/') ? 'video' :
-                    file.type.startsWith('audio/') ? 'audio' : 'document'
-                );
-            } catch (uploadError) {
-                console.error('Media upload error:', uploadError);
-                alert('Failed to upload media: ' + uploadError.message);
-                return;
-            }
-        }
-        
-        // Send message with media
-        socket.emit('sendMessage', {
-            recipient: partnerName,
-            content: content,
-            mediaUrls: mediaUrls,
-            mediaTypes: mediaTypes
-        }, (response) => {
-            if (response.error) {
-                console.error('Error sending message:', response.error);
-                return;
-            }
-            
-            // Add message to UI immediately
-            addMessageToUI({
-                sender: currentUser,
-                recipient: partnerName,
-                content: content,
-                media_urls: mediaUrls,
-                media_types: mediaTypes,
-                timestamp: new Date().toISOString()
-            });
-            
-            // Clear input and preview
-            messageInput.value = '';
-            fileInput.value = '';
-            document.getElementById('mediaPreview').innerHTML = '';
+                Array.from(fileInput.files).forEach(file => formData.append('media', file));
 
-            // Scroll to bottom
-            const container = document.getElementById('messagesContainer');
-            container.scrollTop = container.scrollHeight;
-        });
-        
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', '/upload', true);
+                xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+
+                // Track upload progress
+                xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable) {
+                        const progress = Math.round((e.loaded / e.total) * 100);
+                        document.querySelectorAll('.progress-bar').forEach(bar => bar.style.width = progress + '%');
+                        document.querySelectorAll('.progress-text').forEach(text => text.textContent = `Uploading: ${progress}%`);
+                    }
+                };
+
+                xhr.upload.onloadstart = () => {
+                    document.querySelectorAll('.progress-text').forEach(text => text.textContent = 'Starting upload...');
+                };
+
+                xhr.upload.onload = () => {
+                    document.querySelectorAll('.progress-text').forEach(text => text.textContent = 'Processing...');
+                };
+
+                xhr.onload = async function () {
+                    if (xhr.status === 200) {
+                        const response = JSON.parse(xhr.responseText);
+                        mediaUrls = response.urls;
+                        mediaTypes = response.types;
+
+                        // Send the message with media
+                        socket.emit('sendMessage', {
+                            content,
+                            recipient: partnerName,
+                            mediaUrls: mediaUrls,
+                            mediaTypes: mediaTypes
+                        }, (response) => {
+                            if (!response.error) {
+                                // Add message to UI
+                                addMessageToUI({
+                                    sender: currentUser,
+                                    recipient: partnerName,
+                                    content: content,
+                                    media_urls: mediaUrls,
+                                    media_types: mediaTypes,
+                                    timestamp: new Date().toISOString(),
+                                    status: 'sent'
+                                });
+
+                                // Clear input
+                                messageInput.value = '';
+                                fileInput.value = '';
+                                document.getElementById('mediaPreview').innerHTML = '';
+                            }
+                        });
+                    } else {
+                        throw new Error('Upload failed');
+                    }
+                };
+
+                xhr.onerror = () => {
+                    throw new Error('Upload failed');
+                };
+
+                xhr.send(formData);
+            } catch (error) {
+                console.error('Upload error:', error);
+                alert('Failed to upload media: ' + error.message);
+            } finally {
+                sendButton.disabled = false;
+                document.querySelectorAll('.upload-progress').forEach(p => p.style.display = 'none');
+            }
+        } else {
+            // Send text-only message
+            socket.emit('sendMessage', {
+                content,
+                recipient: partnerName,
+                mediaUrls: [],
+                mediaTypes: []
+            }, (response) => {
+                if (!response.error) {
+                    // Add message to UI
+                    addMessageToUI({
+                        sender: currentUser,
+                        recipient: partnerName,
+                        content: content,
+                        media_urls: [],
+                        media_types: [],
+                        timestamp: new Date().toISOString(),
+                        status: 'sent'
+                    });
+
+                    // Clear input
+                    messageInput.value = '';
+                }
+            });
+        }
     } catch (error) {
-        console.error('Error sending message:', error);
-        alert('Failed to send message. Please try again.');
+        console.error('Error:', error);
+        alert('Failed to send message: ' + error.message);
     }
 });
+
 
 document.getElementById('logoutBtn').addEventListener('click', async () => {
     try {
@@ -649,10 +1022,73 @@ const ALLOWED_FILE_TYPES = {
     'document': ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']
 };
 
-function isFileTypeAllowed(file) {
-    return Object.values(ALLOWED_FILE_TYPES).flat().includes(file.type);
+// Lossless compression configuration
+const COMPRESSION_OPTIONS = {
+    image: {
+        maxSizeMB: 0.8,           // Target size of 800KB
+        maxWidthOrHeight: 1600,   // Reasonable max dimension
+        useWebWorker: true,
+        preserveExif: false,      // Don't preserve metadata to reduce size
+        initialQuality: 0.8,      // Good balance of quality and size
+        fileType: 'auto'
+    }
+};
+
+// Load compression libraries
+async function loadCompressionLibraries() {
+    try {
+        // Load image compression library first
+        await new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/browser-image-compression@2.0.2/dist/browser-image-compression.min.js';
+            script.onload = resolve;
+            script.onerror = reject;
+            document.head.appendChild(script);
+        });
+        
+        console.log('Compression libraries loaded successfully');
+        window.compressionLibrariesLoaded = true;
+    } catch (error) {
+        console.error('Error loading compression libraries:', error);
+        window.compressionLibrariesLoaded = false;
+    }
 }
 
+// Compress image with better error handling
+async function compressImage(file) {
+    try {
+        if (!window.compressionLibrariesLoaded) {
+            console.warn('Compression library not loaded, using original file');
+            return file;
+        }
+
+        console.log('Starting compression for:', file.name);
+        console.log('Original size:', (file.size / 1024 / 1024).toFixed(2) + 'MB');
+        
+        const options = {
+            ...COMPRESSION_OPTIONS.image,
+            onProgress: (percent) => {
+                showLoading(`Compressing ${file.name}... ${Math.round(percent)}%`);
+            }
+        };
+
+        const compressedFile = await imageCompression(file, options);
+        console.log('Compressed size:', (compressedFile.size / 1024 / 1024).toFixed(2) + 'MB');
+        
+        // If compression didn't help, return original
+        if (compressedFile.size >= file.size) {
+            console.log('Compression ineffective, using original');
+            return file;
+        }
+        
+        return compressedFile;
+    } catch (error) {
+        console.error('Compression failed:', error);
+        return file; // Return original file on error
+    }
+}
+
+// Improved media preview handling
 function createMediaPreview(file) {
     return new Promise((resolve) => {
         const reader = new FileReader();
@@ -660,35 +1096,91 @@ function createMediaPreview(file) {
         preview.className = 'media-preview';
 
         reader.onload = (e) => {
-            if (file.type.startsWith('image/')) {
-                const img = document.createElement('img');
-                img.src = e.target.result;
-                img.className = 'preview-content';
-                preview.appendChild(img);
-            } else if (file.type.startsWith('video/')) {
+            if (file.type.startsWith('video/')) {
                 const video = document.createElement('video');
-                video.src = e.target.result;
-                video.controls = true;
                 video.className = 'preview-content';
-                preview.appendChild(video);
-            } else if (file.type.startsWith('audio/')) {
-                const audio = document.createElement('audio');
-                audio.src = e.target.result;
-                audio.controls = true;
-                audio.className = 'preview-content';
-                preview.appendChild(audio);
-            } else {
-                const icon = document.createElement('div');
-                icon.className = 'document-icon';
-                icon.textContent = file.name;
-                preview.appendChild(icon);
+                video.controls = true;
+                video.preload = 'metadata';
+                video.playsInline = true;
+                
+                // Add loading indicator
+                const loadingDiv = document.createElement('div');
+                loadingDiv.className = 'video-loading';
+                loadingDiv.textContent = 'Loading video...';
+                preview.appendChild(loadingDiv);
+                
+                // Handle video events
+                video.onloadedmetadata = () => {
+                    loadingDiv.remove();
+                    preview.appendChild(video);
+                };
+                
+                video.onerror = () => {
+                    console.error('Video preview error:', video.error);
+                    loadingDiv.textContent = 'Video preview failed';
+                    loadingDiv.className = 'video-error';
+                };
+                
+                video.src = e.target.result;
+            } else if (file.type.startsWith('image/')) {
+                const img = document.createElement('img');
+                img.className = 'preview-content';
+                img.src = e.target.result;
+                preview.appendChild(img);
             }
             resolve(preview);
         };
+
+        reader.onerror = () => {
+            console.error('Preview failed:', reader.error);
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'preview-error';
+            errorDiv.textContent = 'Preview failed';
+            preview.appendChild(errorDiv);
+            resolve(preview);
+        };
+
         reader.readAsDataURL(file);
     });
 }
 
+function createMediaElement(url, mediaType) {
+    const container = document.createElement('div');
+    container.className = 'media-container';
+
+    // Create loader element
+    const loader = document.createElement('div');
+    loader.className = 'media-loader';
+    loader.innerHTML = '<div class="spinner"></div> Loading media...';
+    container.appendChild(loader);
+
+    // Create media element
+    let media;
+    if (mediaType === 'video') {
+        media = document.createElement('video');
+        media.controls = true;
+        media.playsInline = true;
+        media.style.maxWidth = '100%';
+    } else {
+        media = document.createElement('img');
+        media.style.maxWidth = '100%';
+        media.loading = 'lazy';
+    }
+
+    media.onloadeddata = media.onload = () => {
+        container.removeChild(loader);
+        media.style.visibility = 'visible';
+    };
+
+    media.onerror = () => {
+        loader.innerHTML = 'Failed to load media';
+        loader.className = 'media-error';
+    };
+
+    media.src = url;
+    container.appendChild(media);
+    return container;
+}
 // Handle typing status
 function setupTypingHandler() {
     const messageInput = document.getElementById('messageInput');
@@ -724,3 +1216,18 @@ function setupTypingHandler() {
         }
     });
 }
+
+// Load compression libraries when page loads
+document.addEventListener('DOMContentLoaded', () => {
+    // Set global flag for tracking library status
+    window.compressionLibrariesLoaded = false;
+    
+    loadCompressionLibraries().then(() => {
+        console.log('All compression libraries loaded successfully');
+        // Set a global variable to indicate libraries are ready
+        window.compressionLibrariesLoaded = true;
+    }).catch(err => {
+        console.error('Failed to load compression libraries:', err);
+        alert('Media compression libraries failed to load. Files will be uploaded without compression.');
+    });
+});
