@@ -64,7 +64,7 @@ const fileFilter = (req, file, cb) => {
 
 const upload = multer({ 
     storage,
-    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+    limits: { fileSize: 32 * 1024 * 1024 }, // 32MB limit
     fileFilter
 }).array('media', 5); // Allow up to 5 files with field name 'media'
 
@@ -208,17 +208,45 @@ app.get('/messages', authenticateToken, async (req, res) => {
     try {
         const username = req.user.username;
         const partner = username.toLowerCase() === 'abid' ? 'sara' : 'abid';
-
+        
+        // Pagination parameters
+        const page = parseInt(req.query.page) || 0;
+        const limit = parseInt(req.query.limit) || 5; // Default 50 messages per page
+        const offset = page * limit;
+        
+        // Get total count for pagination info
+        const [countResult] = await pool.query(
+            `SELECT COUNT(*) as total FROM messages 
+             WHERE (LOWER(sender) = LOWER(?) AND LOWER(recipient) = LOWER(?))
+             OR (LOWER(sender) = LOWER(?) AND LOWER(recipient) = LOWER(?))`,
+            [username, partner, partner, username]
+        );
+        const totalMessages = countResult[0].total;
+        
+        // Fetch paginated messages
         const [messages] = await pool.query(
             `SELECT * FROM messages 
              WHERE (LOWER(sender) = LOWER(?) AND LOWER(recipient) = LOWER(?))
              OR (LOWER(sender) = LOWER(?) AND LOWER(recipient) = LOWER(?))
-             ORDER BY timestamp ASC`,
-            [username, partner, partner, username]
+             ORDER BY timestamp DESC
+             LIMIT ? OFFSET ?`,
+            [username, partner, partner, username, limit, offset]
         );
-
-        res.json(messages);
-
+        
+        // Reverse to get newest at bottom when we display
+        messages.reverse();
+        
+        res.json({
+            messages,
+            pagination: {
+                total: totalMessages,
+                page,
+                limit,
+                totalPages: Math.ceil(totalMessages / limit),
+                hasMore: offset + messages.length < totalMessages
+            }
+        });
+        
     } catch (error) {
         console.error('Error fetching messages:', error);
         res.status(500).json({ error: 'Failed to fetch messages' });
