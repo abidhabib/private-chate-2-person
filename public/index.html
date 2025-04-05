@@ -1,4 +1,4 @@
-c<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -16,7 +16,7 @@ c<!DOCTYPE html>
     <!-- Login Overlay -->
     <div class="login-overlay" id="loginOverlay">
         <div class="login-container">
-            <h2>Pookie 🤍</h2>
+            <h2 class="login-title">Pookie 🤍</h2>
             <form id="loginForm" class="login-form">
                 <div class="form-group">
                     <input type="text" id="username" placeholder="Username" required>
@@ -33,15 +33,12 @@ c<!DOCTYPE html>
     <div class="chat-container" style="display: none;" id="chatContainer">
         <!-- Chat Header -->
         <div class="chat-header">
-            <div class="header-content">
-                <div class="chat-info">
                     <h1 class="chat-title" id="chatTitle"></h1>
                     <div class="partner-status" id="partnerStatus">Last seen recently</div>
-                </div>
-                <button id="logoutBtn" class="logout-btn">
-                    <span class="logout-icon">↪</span>
-                </button>
-            </div>
+                    <button id="logoutBtn" class="logout-btn">
+                        <span class="logout-icon">↪</span>
+                    </button>
+              
         </div>
 
         <!-- Messages Container -->
@@ -77,13 +74,13 @@ c<!DOCTYPE html>
     </div>
 
     <!-- Notification Container -->
-    <div id="notificationContainer" class="notification-container"></div>
-
-    <!-- Fullscreen Image Modal -->
-    <div id="imageModal" class="image-modal">
-        <span class="close-modal">&times;</span>
-        <img id="modalImage" class="modal-content" src="" alt="Fullscreen Image">
+    <div id="notificationContainer" class="notification-container">
+        <audio id="notificationSound" preload="auto">
+            <source src="https://assets.mixkit.co/active_storage/sfx/2354/2354-preview.mp3" type="audio/mp3">
+        </audio>
     </div>
+
+  
 
     <!-- Scripts -->
     <script src="/socket.io/socket.io.js"></script>
